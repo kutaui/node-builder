@@ -1,14 +1,11 @@
 package cmd
 
 import (
-	"errors"
 	"fmt"
 	"io"
 	"os"
-	"os/exec"
 	"path/filepath"
 
-	"github.com/manifoldco/promptui"
 	"github.com/spf13/cobra"
 )
 
@@ -24,273 +21,104 @@ var createCmd = &cobra.Command{
 	Use:   "create",
 	Short: "Create a Node.js project structured for backend development",
 	Long:  `Create a Node.js project structured for backend development and customized to your needs`,
-	Run: func(cmd *cobra.Command, args []string) {
-		project := Project{
-			ProjectName: inputProjectName(),
-			PackageMng:  selectPackageManager(),
-			Framework:   selectBackendFramework(),
-			Database:    selectDatabase(),
-			Orm:         selectORM(),
-		}
-
-		copyPackageJson(project.ProjectName)
-
-		installDependencies(project)
-	},
+	Run:   createProject,
 }
 
-func execCommand(name string, arg ...string) error {
-	cmd := exec.Command(name, arg...)
-	_, err := cmd.Output()
-	if err != nil {
-		return err
+func createProject(cmd *cobra.Command, args []string) {
+	project := Project{
+		ProjectName: promptInput("Project Name", validateProjectName),
+		PackageMng:  promptSelect("Select your package manager", []string{"npm", "yarn", "pnpm", "bun"}),
+		Framework:   promptSelect("Select your NodeJS framework", []string{"express", "fastify"}),
+		Database:    promptSelect("Select your database", []string{"mysql", "postgresql", "sqlite"}),
+		Orm:         promptSelect("Select your ORM", []string{"prisma", "drizzle", "typeorm", "sequelize"}),
 	}
-	return nil
+
+	createProjectStructure(project)
+	installDependencies(project)
 }
 
-func installBasePackages(project Project, installCmd, saveDev string) error {
-	return execCommand(project.PackageMng, installCmd, saveDev, "typescript@latest", "ts-node@latest", "@types/node@latest")
+func createProjectStructure(project Project) {
+	createFolders([]string{"controller", "route", "service", "util", "model", "middleware", "config"})
+	createFileFromTemplate("main.ts", filepath.Join("cmd", "template", "main", project.Framework+".js"))
+	if project.Orm == "drizzle" {
+		createFileFromTemplate(filepath.Join("config", "db.ts"), filepath.Join("cmd", "template", "config", "db", "drizzle-"+project.Database+".js"))
+	}
+	copyPackageJson(project.ProjectName)
 }
 
-func installFramework(project Project, installCmd string) error {
-	return execCommand(project.PackageMng, installCmd, project.Framework)
+func installDependencies(project Project) {
+	installCmd, saveDev := getPackageManagerCommands(project.PackageMng)
+	checkError(installBasePackages(project.PackageMng, installCmd, saveDev))
+	checkError(installFramework(project.PackageMng, installCmd, project.Framework))
+	checkError(installDatabase(project))
 }
 
-func installDependencies(project Project) error {
-	installCmd := "add"
-	saveDev := "--dev"
-	if project.PackageMng == "npm" {
-		installCmd = "install"
-		saveDev = "--save-dev"
-	} else if project.PackageMng == "pnpm" {
-		saveDev = "--save-dev"
+func installDatabase(project Project) error {
+	dbPackages := map[string]map[string]string{
+		"drizzle": {
+			"mysql":      "mysql2",
+			"postgresql": "pg",
+			"sqlite":     "better-sqlite3",
+		},
+		"sequelize": {
+			"mysql":      "mysql2",
+			"postgresql": "pg pg-hstore",
+			"sqlite":     "sqlite3",
+		},
 	}
 
-	if err := installBasePackages(project, installCmd, saveDev); err != nil {
-		return fmt.Errorf("error installing base packages: %w", err)
+	if project.Orm == "drizzle" || project.Orm == "sequelize" {
+		dbPackage := dbPackages[project.Orm][project.Database]
+		return execCommand(project.PackageMng, "install", project.Orm, dbPackage)
 	}
-
-	if err := installFramework(project, installCmd); err != nil {
-		return fmt.Errorf("error installing framework: %w", err)
+	if project.Orm == "prisma" {
+		return execCommand(project.PackageMng, "install", "prisma")
 	}
-
-	if err := installDatabase(project, installCmd, saveDev); err != nil {
-		return fmt.Errorf("error installing database packages: %w", err)
-	}
-
-	return nil
-}
-
-func installDatabase(project Project, installCmd, saveDev string) error {
-	var packages []string
-
-	switch project.Orm {
-	case "drizzle":
-		packages = append(packages, "drizzle-orm")
-		switch project.Database {
-		case "postgresql":
-			packages = append(packages, "pg")
-		case "mysql":
-			packages = append(packages, "mysql2")
-		case "sqlite":
-			packages = append(packages, "better-sqlite3")
-		default:
-			return fmt.Errorf("unsupported database for drizzle: %s", project.Database)
-		}
-		if err := execCommand(project.PackageMng, append([]string{installCmd}, packages...)...); err != nil {
-			return fmt.Errorf("error installing drizzle and database driver: %w", err)
-		}
-		return execCommand(project.PackageMng, installCmd, saveDev, "drizzle-kit")
-
-	case "prisma":
-		return execCommand(project.PackageMng, installCmd, "prisma")
-
-	case "sequelize":
-		packages = append(packages, "sequelize")
-		switch project.Database {
-		case "postgresql":
-			packages = append(packages, "pg", "pg-hstore")
-		case "mysql":
-			packages = append(packages, "mysql2")
-		case "sqlite":
-			packages = append(packages, "sqlite3")
-		default:
-			return fmt.Errorf("unsupported database for sequelize: %s", project.Database)
-		}
-		return execCommand(project.PackageMng, append([]string{installCmd}, packages...)...)
-
-	default:
-		return fmt.Errorf("unsupported ORM: %s", project.Orm)
-	}
+	return fmt.Errorf("unsupported ORM: %s", project.Orm)
 }
 
 func copyPackageJson(projectName string) {
-	packageJsonFile, err := os.Create(filepath.Join(".", "package.json"))
-	if err != nil {
-		cobra.CheckErr(err)
-		fmt.Printf("Error: %v\n", err)
-		os.Exit(1)
-	}
-	defer packageJsonFile.Close()
+	createFileFromTemplate("package.json", filepath.Join("cmd", "template", "package.json"))
+	execCommand("npm", "pkg", "set", "name="+projectName)
+}
 
-	srcFile, err := os.Open(filepath.Join("cmd", "template", "package.json"))
-	if err != nil {
-		cobra.CheckErr(err)
-		fmt.Printf("Error: %v\n", err)
-		os.Exit(1)
+func getPackageManagerCommands(packageMng string) (installCmd, saveDev string) {
+	switch packageMng {
+	case "npm":
+		return "install", "--save-dev"
+	case "yarn":
+		return "add", "--dev"
+	case "pnpm":
+		return "add", "--save-dev"
+	default:
+		return "install", "--save-dev"
 	}
+}
+
+func installBasePackages(packageMng, installCmd, saveDev string) error {
+	return execCommand(packageMng, installCmd, saveDev, "typescript@latest", "ts-node@latest", "@types/node@latest")
+}
+
+func installFramework(packageMng, installCmd, framework string) error {
+	return execCommand(packageMng, installCmd, framework)
+}
+
+func createFileFromTemplate(destPath, srcPath string) {
+	destFile, err := os.Create(destPath)
+	checkError(err)
+	defer destFile.Close()
+
+	srcFile, err := os.Open(srcPath)
+	checkError(err)
 	defer srcFile.Close()
 
-	_, err = io.Copy(packageJsonFile, srcFile)
-	if err != nil {
-		cobra.CheckErr(err)
-		fmt.Printf("Error: %v\n", err)
-		os.Exit(1)
-	}
-	err = packageJsonFile.Sync()
-	if err != nil {
-		cobra.CheckErr(err)
-		fmt.Printf("Error: %v\n", err)
-		os.Exit(1)
-	}
-
-	cmd := exec.Command("npm", "pkg", "set", "name="+projectName)
-	_, err = cmd.Output()
-	if err != nil {
-		cobra.CheckErr(err)
-		fmt.Println("could not run command: ", err)
-		os.Exit(1)
-	}
+	_, err = io.Copy(destFile, srcFile)
+	checkError(err)
+	checkError(destFile.Sync())
 }
 
-func inputProjectName() string {
-	validate := func(input string) error {
-		length := len(input)
-		if length < 3 {
-			return errors.New("Project name should be more than 3 characters")
-		}
-		return nil
+func createFolders(folders []string) {
+	for _, folder := range folders {
+		checkError(os.Mkdir(folder, 0755))
 	}
-
-	prompt := promptui.Prompt{
-		Label:    "Project Name",
-		Validate: validate,
-	}
-
-	result, err := prompt.Run()
-
-	if err != nil {
-		fmt.Printf("Prompt failed %v\n", err)
-		os.Exit(1)
-	}
-
-	return result
-}
-
-func selectPackageManager() string {
-	pkgmanagers := []string{"npm", "yarn", "pnpm", "bun"}
-	index := -1
-	var result string
-	var err error
-
-	for index < 0 {
-		prompt := promptui.Select{
-			Label: "Select your package manager",
-			Items: pkgmanagers,
-		}
-
-		index, result, err = prompt.Run()
-
-		if index == -1 {
-			pkgmanagers = append(pkgmanagers, result)
-		}
-	}
-
-	if err != nil {
-		fmt.Printf("Prompt failed %v\n", err)
-		os.Exit(1)
-	}
-
-	return result
-}
-
-func selectBackendFramework() string {
-	frameworks := []string{"express", "fastify", "koa"}
-	index := -1
-	var result string
-	var err error
-
-	for index < 0 {
-		prompt := promptui.Select{
-			Label: "Select your NodeJS framework",
-			Items: frameworks,
-		}
-
-		index, result, err = prompt.Run()
-
-		if index == -1 {
-			frameworks = append(frameworks, result)
-		}
-	}
-
-	if err != nil {
-		fmt.Printf("Prompt failed %v\n", err)
-		os.Exit(1)
-	}
-
-	return result
-}
-
-func selectDatabase() string {
-	databases := []string{"mysql", "postgresql", "sqlite"}
-	index := -1
-	var result string
-	var err error
-
-	for index < 0 {
-		prompt := promptui.Select{
-			Label: "Select your database",
-			Items: databases,
-		}
-
-		index, result, err = prompt.Run()
-
-		if index == -1 {
-			databases = append(databases, result)
-		}
-	}
-
-	if err != nil {
-		fmt.Printf("Prompt failed %v\n", err)
-		os.Exit(1)
-	}
-
-	return result
-}
-
-func selectORM() string {
-	orms := []string{"prisma", "drizzle", "typeorm", "sequelize"}
-	index := -1
-	var result string
-	var err error
-
-	for index < 0 {
-		prompt := promptui.Select{
-			Label: "Select your ORM",
-			Items: orms,
-		}
-
-		index, result, err = prompt.Run()
-
-		if index == -1 {
-			orms = append(orms, result)
-		}
-	}
-
-	if err != nil {
-		fmt.Printf("Prompt failed %v\n", err)
-		os.Exit(1)
-	}
-
-	return result
 }
