@@ -1,4 +1,4 @@
-module github.com/kutaui/node-blueprint
+module github.com/kutaui/node-builder
 
 go 1.22.0
 
