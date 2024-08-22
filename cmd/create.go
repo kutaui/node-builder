@@ -5,7 +5,9 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"time"
 
+	"github.com/briandowns/spinner"
 	"github.com/spf13/cobra"
 )
 
@@ -25,6 +27,9 @@ var createCmd = &cobra.Command{
 }
 
 func createProject(cmd *cobra.Command, args []string) {
+	s := spinner.New(spinner.CharSets[9], 100*time.Millisecond)
+	s.Start()
+
 	project := Project{
 		ProjectName: promptInput("Project Name", validateProjectName),
 		PackageMng:  promptSelect("Select your package manager", []string{"npm", "yarn", "pnpm", "bun"}),
@@ -33,8 +38,14 @@ func createProject(cmd *cobra.Command, args []string) {
 		Orm:         promptSelect("Select your ORM", []string{"prisma", "drizzle", "typeorm", "sequelize"}),
 	}
 
+	s.Suffix = " Creating project structure..."
 	createProjectStructure(project)
+
+	s.Suffix = " Installing dependencies..."
 	installDependencies(project)
+
+	s.Stop()
+	fmt.Println("Project created successfully!")
 }
 
 func createProjectStructure(project Project) {
@@ -47,10 +58,14 @@ func createProjectStructure(project Project) {
 }
 
 func installDependencies(project Project) {
+
 	installCmd, saveDev := getPackageManagerCommands(project.PackageMng)
 	checkError(installBasePackages(project.PackageMng, installCmd, saveDev))
+
 	checkError(installFramework(project.PackageMng, installCmd, project.Framework))
+
 	checkError(installDatabase(project))
+
 }
 
 func installDatabase(project Project) error {
