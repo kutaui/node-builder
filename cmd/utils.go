@@ -37,6 +37,10 @@ func promptSelect(label string, items []string) string {
 }
 
 func validateProjectName(input string) error {
+	if input == "." {
+		return nil
+	}
+
 	if len(input) < 3 {
 		return errors.New("Project name should be more than 3 characters")
 	}
